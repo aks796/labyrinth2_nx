@@ -1,0 +1,395 @@
+# labyrinth2_nx: notes
+
+How the port works, what the 32-bit libraries need, and what was learned
+running a 32-bit Android game on the Switch. The player-facing page is
+[README.md](README.md).
+
+## Layout
+
+| Part | What it is |
+| --- | --- |
+| `source/` | The wrapper: a 32-bit (AArch32) Horizon program. It loads the game's `liblabyrinthii.so` and provides bionic libc, the Android NDK, JNI, EGL/GLES 1, audio, input and the file system. The game's Java menus are rebuilt here (`lab_screens*.c` for the phone's, `lab_hd*.c` for the iPad's). |
+| `launcher/` | A 64-bit NRO that carries the 32-bit program and the iPad game's files (`ipad.ipa`) in its romfs, and installs the program for a sphaira forwarder. |
+| `tools/` | Host scripts and programs: the SD card package, the iPad files for the NRO (`make_ipad_assets.py`), host tests against your APK, a preview renderer for the menus, the import table generator. |
+| `portlibs32/` | Mesa, libGLESv1_CM and libdrm_nouveau built for AArch32, from [mesa32](https://github.com/aks796/mesa32). |
+
+A 32-bit program cannot be an NRO, because hbloader is 64-bit. The launcher
+therefore runs inside a sphaira forwarder title. It writes
+`atmosphere/contents/<forwarder title id>/exefs.nsp`, which is the 32-bit
+program with its `main.npdm` retargeted to that title id
+(`source/dcr_exefs.h`), and restarts the title. From then on Atmosphère starts
+the 32-bit program for that icon. The program installs newer builds from any
+NRO in its folder that carries one (`dcr_setup_update_from_nro`).
+
+`labyrinth2_nx.json` (the NPDM) sets `"is_64_bit": false` and
+`"address_space_type": 0`, which is the 32-bit address space. The program id
+is `0x0100000000001010`.
+
+The runtime (loader, bionic shims, JNI, exception handler, scheduler, audout,
+Mesa/EGL, setup, launcher) is shared with the Disney Crossy Road, PvZ TV Touch
+and Angry Birds Space ports. It keeps its `dcr_` names so fixes can move
+between them.
+
+## The 32-bit libraries: what they need
+
+The port builds with devkitARM, [libnx32](https://github.com/aks796/libnx32),
+and Mesa and libdrm_nouveau built for AArch32
+([mesa32](https://github.com/aks796/mesa32)). libnx32 is
+vita2hos's libnx port (vita2hos/libnx
+`721c977`), merged with switchbrew/libnx up to 4.12.0, on branch `master`
+at `41b61f92`. This build links against it.
+
+### libnx32: fixed
+
+Commit `cb01ef9f`, "IPC data that depended on the size of an enum":
+devkitARM builds with small enums (`-fshort-enums`), while the system reads
+4-byte enums. `hidSetSupportedNpadIdType` sent one byte per controller id, so
+wireless controllers could not connect; the swkbd arguments, several applet
+structs and raw enum arguments were wrong too. `serviceDispatchIn/InOut` now
+refuse enum raw data at compile time, and `tools32/check_short_enums.sh`
+compares struct layouts both ways. This port uses the swkbd, web and
+controller applets, all of which needed the fix.
+
+Commit `c6c53d20` fixed what this port and the other 32-bit ports worked
+around. This port keeps its own hardware-tested versions, which still take
+precedence at link time (listed with each):
+
+1. **`svcSetThreadCoreMask`** (`svc32.s`) takes a `u64` mask. The AArch32 SVC
+   reads it from `r2:r3`; `r3` used to carry whatever the caller left there,
+   so the kernel returned InvalidCoreId and every thread stayed on its
+   creation core. This port: `source/dcr_sched.c` issues the SVC itself.
+2. **`svcGetThreadCoreMask`** restores the stack it pushes.
+3. **`svcWaitForAddress` / `svcSignalToAddress`** stubs, with the int32 value
+   in `r2` and the timeout in `r3:r4`. That layout, not the 64-bit-value one
+   of Atmosphère 1.8.0+, is the one that waited correctly on HOS 21 with
+   Atmosphère and on Ryujinx. This port: `source/bionic_pthread.c` issues
+   them itself and self-tests the layout at boot.
+4. **`kernel/virtmem.c`**: region bounds are `u64` (the 32-bit ASLR region
+   ends at `0x1_0000_0000`, so `base + size` wrapped to 0), and 32-bit
+   processes look for mapping space in the code region `[0x200000,
+   0x40000000)`, the only place the kernel accepts Shared, Code, AliasCode,
+   SharedCode, GeneratedCode, Transfered and ThreadLocal mappings (outside it,
+   `hidInitialize` failed with InvalidCurrentMemory). This port:
+   `source/nx32_virtmem.c` replaces the whole object.
+5. **`__libnx_initheap`** clamps to the 1 GiB heap region and retries
+   smaller. It used to ask for TotalMemory - UsedMemory, about 3 GB, and
+   abort before `main()`. This port: `source/nx_init.c`.
+6. **audout / audin**: the buffer descriptor goes out in the 64-bit layout
+   (0x28 bytes, pointers as `u64`), and released tags come back as `u64`.
+   This port: `source/lab_audio.c` sends its own descriptor.
+7. **`exception32.s`**: a working AArch32 exception entry, with its own stack
+   and `r8`-`r12`, `d0`-`d31` and FPSCR saved, and an optional
+   `__libnx_exception_handler32`. The kernel's 32-bit entry saves only
+   `r0`-`r7`, `sp`, `lr`, `pc`, `pstate`, `esr` and `far`, with `sp` in the
+   process-local region (under 448 bytes). This port: `source/exc32.S` and
+   `source/exc_handler.c`, which writes `crash.log`.
+8. **`armICacheInvalidate`** works: a data-cache clean, then a spare code
+   page's permission flip, which makes the kernel invalidate every core's
+   instruction cache (AArch32 EL0 has no cache maintenance instructions). This
+   port: `source/code_flush.c`.
+9. **`envAcquireOwnProcessHandle()`**: a real handle to the running process,
+   made over a session to itself. This port: `source/selfproc.c`.
+10. **`nwindowGetDefaultDisplay()`**: the default window's display (vi allows
+    one OpenDisplay per process). This port makes the default window itself
+    (`source/nx_init.c`).
+11. **SHA-1, SHA-256 and HMAC** build for AArch32 (C block functions).
+    `sha256CalculateHash` was missing before. This port keeps the C SHA-256
+    in `source/lab_online.c`: that file also builds on a PC for
+    `tools/test_online.sh`, and the digest makes the player's online ID, so
+    it must not change.
+12. **fsdev** maps FS result 2-0007 (`0xE02`, the file is open for writing
+    elsewhere) to `EBUSY` instead of `EIO`. `stat()` still opens a file to
+    size it, which fails on a file held open for writing. This port:
+    `source/bionic_io.c` sizes such files through the handle it holds.
+13. **`timespec_get`**: a weak C11 version (declared by newlib, never
+    implemented; Mesa's threads need it). This port: `source/host_compat.c`.
+14. **`switch32.ld`** places `.rel.dyn` and `.rel.plt` (ARM relocations are
+    `SHT_REL`). This port uses its own `dcr32.ld`.
+
+The pthread change: with `svcSetThreadCoreMask` fixed, libnx's own
+`pthread_create` works on AArch32, so Mesa's worker threads now start. This
+port does not link libnx's `pthread_create`: the game's threads go through
+`source/bionic_pthread.c`, and the GLES 1 context starts no Mesa threads.
+
+### libnx32: still open
+
+1. **crt0 `__nx_dynamic`**. devkitARM's target libraries (newlib, libsysbase,
+   libstdc++) are not built with `-fPIC`, so a PIE link has `R_ARM_RELATIVE`
+   relocations in `.text` and `.rodata`. `__nx_dynamic` cannot apply them. If
+   a Code page is made writable, Mesosphère turns it into CodeData, which can
+   never be executable again (a hardware boot died with svcBreak `0xDC03`).
+   Either build those libraries `-fPIC`, or apply the relocations through a
+   writable alias:
+   - Map each memory block with `svcMapProcessMemory`, one block per call; a
+     call spanning blocks of different state fails with `0xD401`.
+   - Get a real process handle by sending `CUR_PROCESS_HANDLE` over a
+     session to yourself.
+
+   Workaround: `source/crt0_reloc.c`, with `dcr32.specs` and `dcr32.ld`
+   (`-z notext`; page 0 holds only crt0 and the relocator).
+2. **`__appInit`** aborts on any service failure. For 32-bit processes under
+   Ryujinx, the time service's shared memory fails to map while everything
+   else works. Reporting instead of aborting makes emulator testing
+   possible. Workaround: `source/nx_init.c`.
+3. **`exit()`** shuts libnx's services down while other threads still run.
+   An engine that calls `_exit()` on one thread then has another thread
+   poll hid after it is gone, and libnx aborts (`0x1159`). Guest exits go
+   straight to `svcExitProcess` after flushing the log
+   (`source/bionic_core.c`). Not a bug as such, but a trap for every port.
+
+### devkitARM newlib
+
+- libm is soft-float: every `double` operation is a libgcc `__aeabi_d*` call.
+  Results are correct but slow. A VFP (softfp) build would help. Workaround:
+  `source/bionic_math.c` does sqrt, abs, rounding and min/max in VFP.
+- ABI differences a bionic shim must convert: `mbstate_t` (4 bytes in bionic,
+  8 in newlib), `off_t`, `timespec`/`timeval`, errno values, open flags
+  (`source/bionic_*.c`).
+
+### mesa32 (Mesa 20.1.0-rc3, libdrm_nouveau 1.0.1)
+
+devkitPro's Switch Mesa (branch `switch-20.1.0-rc3`) built for AArch32, including
+`libGLESv1_CM` (this game is OpenGL ES 1.1). `portlibs32/` holds the build
+from 2026-09-30. Small enums break Mesa in two places, fixed by
+mesa32 `099a02a3` ("AArch32: don't depend on int-sized enums"):
+
+- Enum bitfields: `tgsi_opcode_info.opcode:10` becomes plain `unsigned`.
+- `mesa_format`: the result of `_mesa_format_from_format_and_type` can be a
+  `MESA_ARRAY_FORMAT` (bit 31). A 16-bit enum truncates it to a bogus
+  format. It is now kept in a `uint32_t` in `st_format.c`, `glformats.c` and
+  `formats.c`.
+
+mesa32's other commits add `thrd_success` in `u_thread.h` (`24aa14fe`), correct
+`eglQuerySurface` sizes (`4e41d89f`), ETC2/ASTC on chipset 0x120
+(`2c27955c`), render-to-texture without storage (`dddc69a4`), and an opt-in
+glthread (`972de9c1`). `libGLESv1_CM` itself is unchanged.
+Still open there: EGL pbuffers, and the console's and EGL's buffer slots.
+
+### Toolchain flags
+
+```text
+-march=armv8-a+crc+crypto -mtune=cortex-a57 -mfloat-abi=softfp
+-mfpu=neon-fp-armv8 -mtp=soft -fPIE -ftls-model=local-exec
+```
+
+`softfp` is not a preference. armeabi passes float and double in core
+registers, and so do libnx32 and newlib, so every shim, callback and engine
+entry point agrees without per-function annotations.
+
+## Notes for porting other 32-bit games
+
+- **Threads.** Horizon does not time-slice at the priorities games use. A
+  runnable thread keeps its core until it blocks. Mesosphère rotates only the
+  priority-59 queue of cores 0-2 (and 63 on core 3), every 10 ms. Run guest
+  threads at priority 59 and spread them over cores 0-2 with a 64-bit core
+  mask (`source/dcr_sched.c`).
+- **Condition variables.** libnx's CondVar forgets a signal that arrives with
+  no waiter. Engines signal without holding the mutex, so bionic condvars
+  need a sequence counter on `svcWaitForAddress` (`source/bionic_pthread.c`).
+- **Relocations.** 32-bit Android `.so` files use `SHT_REL`: the addend is
+  the word already at the target. The import stub is `LDR PC,[PC,#-4]` plus
+  the address, which interworks with Thumb targets (`source/so_util.c`).
+- **More than one copy of a library.** The loader gives every load its own
+  code and globals, so one `.so` can be loaded several times as independent
+  engines. This port runs up to four copies of the same engine: menus and
+  single player, a second board for local play, and two iPad-board copies
+  (`source/lab_loader.c`). JNI callbacks find their copy through a global
+  set around each call.
+- **Changing an engine's constants.** Constants such as a world size are
+  float literals in literal pools. Patching them per copy, each word checked
+  before it is written, changed the engine's 320 x 480 world to the iPad's
+  576 x 768 (`source/lab_loader.c`, `k_ipad`).
+- **Memory.** 4 GB of address space is carved into 1 GiB regions (see
+  virtmem above). Reserve the game module's region up front and size it from
+  the ELF program headers (`source/config.h`).
+- **File system speed.** Every open on the SD card is an IPC to fs. Engines
+  that look a file up in several places open thousands of missing files. A
+  directory-listing cache answers "not there" without the card
+  (`source/dcr_dircache.c`), and the APK's bytes are cached in RAM
+  (`source/dcr_apkcache.c`). Anything written by another path must forget the
+  cache: a level pack written with plain `fopen` was then missing to the
+  engine, which crashed on it.
+- **Input.** Frames can take hundreds of milliseconds (a thumbnail, a level
+  load). A thread that samples the buttons every 4 ms and keeps each press
+  for the next frame stops presses from being lost (`source/lab_input.c`).
+  Joy-Cons held sideways need their stick and buttons turned.
+- **Applets.** The keyboard, the web browser and the controller screen block
+  the calling thread. Show them after a frame is presented, with audio
+  paused (`source/lab_applet.c`).
+- **CPU boost.** `appletSetCpuBoostMode(FastLoad)` gives 1785 MHz but drops
+  the GPU to its minimum. Use it during loads and long frames only
+  (`source/dcr_boost.c`).
+- **Controllers.** Send `hidSetSupportedNpadIdType` with 32-bit ids, or
+  wireless controllers never connect (fixed in the libnx32 fork).
+- **Diagnostics that paid off.**
+  - A watchdog that flushes the log and reports stuck threads with their
+    stacks (`source/watchdog.c`).
+  - Long-frame reports with what the frame spent its time on.
+  - A test script that drives input and saves frames in the emulator
+    (`source/lab_test.c`).
+
+## The game
+
+The game is the Android (armeabi) build of Labyrinth 2 1.29
+(`se.illusionlabs.labyrinth2`, versionCode 20). The iPad menus and levels
+come from the iPad game, Labyrinth 2 HD 1.6.0.
+
+### The iPad game's files
+
+The launcher's romfs carries `ipad.ipa`: the 181 of the `.ipa`'s 1365 files
+the port uses (16.5 MB), under the `.ipa`'s own paths, so `source/lab_apk.c`
+reads it as it reads a whole one. `tools/make_ipad_assets.py` makes it at
+build time: every picture the source names, with the suffixes and families
+the menus build at run time, and of each only the file the loader opens
+(@2x first); the level packs (`officiallevelsipad/`); each theme's floor and
+walls; the splash; and `Info.plist`. The first start copies it from the
+newest NRO in the game folder to `data/ipad.ipa`, again when the NRO's build
+changes (`dcr_setup_ipad_from_nro`, `source/dcr_setup.c`). A player's own
+`.ipa` in the game folder is used instead.
+
+### The engine
+
+- One library, `liblabyrinthii.so`, about 320 KB: ARMv5TE, mostly Thumb-1,
+  soft-float, GCC 4.6 (NDK r8). It has 89 imports: GLES 1 with
+  `OES_framebuffer_object`, zlib, libc, `new`/`delete` and `__cxa_guard`.
+- The engine never calls `FindClass`. The Java managers pass themselves to
+  their native `init()` (ZRegistry, LevelsDB, SoundManager, Accelerometer,
+  ZFont, GameActivity), and the engine uses `GetObjectClass` and
+  `GetMethodID` on them. `source/jni_core.c` provides the JNI environment and
+  `source/lab_java.c` the Java classes' methods.
+- `setResourcePath(filesDir)`: the engine opens `<path>/<name>` for its
+  files. Level packs are zips in `zipfiles/<pack id>`, read with minizip.
+- Touches are in a 320 x 480 space, y up. The accelerometer takes three floats
+  in g: x right, y up, z out of the screen.
+- The level loader opens `level<n>.xml` without checking that it exists. A
+  pack whose zip has fewer levels than its info says crashes it. Levels are
+  checked before a pack is played, and thumbnails are drawn only for levels
+  that are there (`source/lab_files.c`, `source/lab_hd_packs.c`).
+- The engine's XML reader cannot read `<`, `>` or `"` in `info.xml`, so the
+  Java game hid those packs. The port escapes the text before the engine
+  sees it.
+- The engine asks for the fonts `HelveticaNeue` and `HelveticaNeue-Bold` by
+  name, as on iOS. `source/lab_font.c` uses a copy from the SD card if there
+  is one, else the console's fonts.
+
+### Offsets used (1.29, each checked against the code before use)
+
+| What | Where |
+| --- | --- |
+| Game renderer singleton | `*(base+0x4f3dc)` |
+| Its overlay manager, and the pause popup | renderer `+0x38`, then `+0x188` |
+| The overlay's buttons | manager `+0xc4`..`+0xdc`: centre x, y, size, visible `+0x8c`, enabled `+0x90` |
+| Overlay orientation | `GameRenderer::setOrientation`, `+0x3c0e0` |
+| Game object: level, pack, run time | `*(base+0x4f408)`: `+8` level, `+0xc` pack, `+0x1c` run time in seconds |
+| The level's balls | level `+8`: a vector of 4 slots; in play `+0x48`; position `+0x5c`/`+0x60` |
+| Batched balls renderer | renderer `+48`, constructor `+0x2e67c`, vtable `+0x4d460` |
+
+### The ghost ball
+
+The Android build carries the iPad's ghost code (GhostBallRecorder,
+GhostBallPlayer), but nothing calls it: no ghost manager is made, set up or
+started. Only its bookkeeping remains: a run that beats the ghost's time is
+written as `TIMEG_<pack>_<n>`. The batched balls renderer still draws
+GhostBalls (level objects of type 25) as the iPad did. `source/lab_ghost.c`
+records each run on the engine's own run clock, saves it when the engine
+writes `TIMEG_`, and replays it through that renderer: it rebuilds the
+level's renderer with one GhostBall of its own (`lab_game_eng_ghost`,
+`source/lab_game.c`).
+
+### iPad boards
+
+The Android engine has no iPad board. Its world is 320 x 480 units, from
+about 30 float constants (the camera, the fit into the surface, mesh scales,
+the floor, the bounds, the hole map). A separate copy of the engine is loaded
+with those constants set to 576 and 768 and draws into a 3:4 surface. The
+game's own overlays keep their 320 x 480 space, widened to 3:4. The iPad packs
+and floors are unpacked from the iPad game's files (`source/lab_files.c`).
+
+### Online
+
+Illusion Labs' level servers still answer:
+`contentsystem.labyrinth2.com` for iPhone packs and
+`contentsystem-ipad.labyrinth2.com` for iPad packs. They use plain HTTP and
+require the `Labyrinth2` user agent. `source/lab_online.c` follows the Java
+client's signing and requests (`/register`, `/list`, `/get`, `/update`,
+`/publish`). The account belongs to a device id, which the port makes from a
+hash of the console's serial number, or from the console's user account when
+the serial is blank (emuNAND), and keeps in `data/device_id`.
+
+### Emoji
+
+Pack names use the iPhone's pre-iOS 5 emoji (SoftBank private-use
+characters) and Unicode emoji. `source/lab_emoji.c` draws them from an `sbix`
+or `CBDT` font the player supplies, mapping the old codes to Unicode with
+`source/lab_emoji_softbank.h`.
+
+## First start and updates
+
+Setup work shows PvZ Touch's green progress bar on the boot console, titled
+"Labyrinth 2" (`log_console_progress`, `source/util.c`), instead of the log.
+`dcr_setup_progress` (`source/dcr_setup.c`) stages it over the whole first
+launch: the library, the Java class list, the iPad files copied out of the
+NRO (by bytes), the game's files from the APK (by files), the iPad level
+packs, floors and walls, then "Starting the game". An update from a newer
+NRO shows "Updating to the new build, then restarting". A start with nothing
+to set up shows nothing. The log goes to `debug.log` as always, or scrolls on
+screen instead with `[debug] boot_log_on_screen`. The console is retired
+before EGL takes the window (`log_console_close`): Mesa registers 3 buffer
+slots and the console 2, so the console's third frame after Mesa would fail
+with `0x2B59`.
+
+## Build details
+
+Needs Docker, the toolchain image `ghcr.io/vita2hos/devcontainer/vita2hos`,
+[libnx32](https://github.com/aks796/libnx32) (its `prefix/`, from a
+checkout next to this one, or `DCR_LIBNX32`) and
+[mesa32](https://github.com/aks796/mesa32) (its `lib/` and `include/` in
+`portlibs32/`). Both have prebuilt releases. `build.sh` mounts the
+libnx32 headers and archives over the image's, and leaves the image's other
+libraries (miniz, deko3d) in place.
+
+```bash
+./build.sh              # labyrinth2_nx.nsp + labyrinth2_nx.build
+launcher/build.sh       # launcher/labyrinth2_nx.nro (carries the NSP and ipad.ipa)
+L2_IPA=<Labyrinth 2 HD .ipa> launcher/build.sh   # the .ipa to take the iPad files from
+tools/package_sd.sh     # both, then SD_CARD/ and SD_CARD.zip
+```
+
+Host checks against your own APK:
+
+```bash
+tools/test_host.sh <apk>          # setup, level table, saves, pictures, sounds
+tools/test_online.sh              # the level server client (no account made)
+tools/preview.sh <apk> [out dir]  # every rebuilt screen as a PNG; IPA=<ipa> for the iPad's
+python3 tools/gen_imports.py --libs <unpacked apk>/lib/armeabi   # source/imports.c
+```
+
+## Testing in Ryujinx (1.1.1098)
+
+Run `labyrinth2_nx.nsp` directly (title `0x0100000000001010`) with the game
+folder at `sdcard/switch/labyrinth2_nx/`. It boots, plays levels and runs the
+menus. What only the emulator needs is switched on by `dcr_is_emulator()` and
+never runs on a Switch:
+
+- `source/emu_fixups.c`: its A32 decoder lacks fixed-point VCVT, which Mesa
+  uses. Each one becomes a branch to a stub of instructions it has.
+- After a rebuild, delete `games/0100000000001010/cache`. Ryujinx's
+  translation cache of the previous build crashes it.
+- It reads a render target back only once: later reads return the first
+  picture or black. The test captures use a new target each time.
+- The online screens stop it: `ISystemSettingsServer` command 68 is not
+  implemented.
+
+`test_script.txt` in the game folder drives the game (`source/lab_test.c`):
+`wait <screen|level|paused|levelend> [s]`, `waitlog <text> [s]`,
+`press|hold p1|p2 <button> [frames]`, `stick p1|p2 <x> <y> <frames>`,
+`sleep <frames>`, `shot <name>` (saved as `test/<name>.bmp`), `set <key>
+<int>`, `focus <id>`, `play <pack> [level]`, `race <pack> [level]`, `p2 on`,
+`quit`. A `shot` and the next command run in the same frame.
+
+## When something goes wrong
+
+Everything is in `sd:/switch/labyrinth2_nx/`: `debug.log`, `crash.log` (the
+port's own exception handler) and Atmosphère's report in
+`sd:/atmosphere/crash_reports/`. A hang gets a `[watchdog]` report after 10 s.
+Long frames are logged as `[frame]` lines.

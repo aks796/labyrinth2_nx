@@ -1,0 +1,13 @@
+build/
+launcher/build/
+launcher/romfs/
+*.nsp
+*.nro
+*.nacp
+*.elf
+*.build
+SD_CARD/
+SD_CARD.zip
+portlibs32/include/
+portlibs32/lib/
+.DS_Store
