@@ -32,7 +32,7 @@
 #include "lab_emoji_softbank.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 static const char *const k_names[] = {"emoji.ttf",           "emoji.ttc",           "emoji.otf",
                                       "AppleColorEmoji.ttf", "Apple Color Emoji.ttf", "AppleColorEmoji@2x.ttf",

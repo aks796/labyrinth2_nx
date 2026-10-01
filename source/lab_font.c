@@ -37,7 +37,7 @@
 #include "lab.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 typedef struct {
   const uint8_t *d;

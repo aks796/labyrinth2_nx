@@ -13,6 +13,7 @@
 #include <switch.h>
 
 #include "lab.h"
+#include "rt_applet.h"
 #include "util.h"
 
 static struct {
@@ -138,12 +139,14 @@ void lab_applets_pump(void) {
   if (!kind)
     return;
   lab_audio_pause(1);
+  dcr_applet_busy(1); /* no frames while it is up, and nothing wrong (the watchdog) */
   if (kind == 1)
     show_keyboard();
   else if (kind == 3)
     show_controllers();
   else
     show_browser();
+  dcr_applet_busy(0);
   lab_audio_pause(0);
   Q.kind = 0;
 }

@@ -32,6 +32,7 @@ void debugPrintf(const char *fmt, ...) {
 void log_console_show_text(void) {}
 void log_console_update(void) {}
 void log_flush_ring(void) {}
+void dcr_setup_progress(const char *what, int permille) { (void)what, (void)permille; } /* the setup bar (the runtime's dcr_setup.c) */
 ssize_t dcr_apkcache_read(uint64_t off, void *buf, size_t n) { return -1; } /* lab_apk's own reads */
 
 /* lab_text.c's font and GL: 0.5 em a character, a fake texture */

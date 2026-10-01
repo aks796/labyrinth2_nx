@@ -21,7 +21,7 @@
 #include "lab.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 enum { T_STRING, T_BINARY, T_INT, T_FLOAT };
 

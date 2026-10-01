@@ -7,7 +7,7 @@ set -e
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TMPDIR:-/tmp}/lab_online_test"
 mkdir -p "$OUT/data"
-cc -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$HERE/source" "$HERE/tools/test_online.c" \
+cc -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$HERE/source" -I"$HERE/runtime/source" "$HERE/tools/test_online.c" \
   "$HERE/source/lab_online.c" "$HERE/source/lab_net.c" "$HERE/source/lab_json.c" -lpthread -o "$OUT/test_online"
 # the Java's df.b and df.a(byte[]), in Python, against the C
 python3 - "$OUT/test_online" <<'PY'

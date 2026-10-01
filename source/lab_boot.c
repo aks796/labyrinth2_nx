@@ -17,8 +17,12 @@
  *
  * HOME: the game's pause overlay opens (if no popup is up), the sound
  * pauses, the saves are written; Android's onPause destroyed the GL surface
- * and restarted the level on return, which the port need not do. Closing:
- * the statistics and the saves, then the process ends. MIT.
+ * and restarted the level on return, which the port need not do. The system
+ * freezes the process for HOME and sleep: the focus messages come when it
+ * runs again, and a freeze the clocks saw opens the pause overlay as well
+ * (the runtime's rt_applet.c calls port_focus_lost / port_focus_gained /
+ * port_process_frozen). Closing: the statistics and the saves, then the
+ * process ends. MIT.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,76 +30,62 @@
 #include <switch.h>
 
 #include "config.h"
+#include "dcr_apkcache.h"
+#include "dcr_boost.h"
 #include "dcr_config.h"
-#include "dcr_time.h"
 #include "error.h"
 #include "gl_layer.h"
 #include "jni.h"
 #include "lab.h"
 #include "lab_online.h"
 #include "lab_ui.h"
+#include "rt_applet.h"
 #include "util.h"
-
-void dcr_watchdog_start(void);
-void dcr_boost_poll(void);
-void dcr_boost_report(void);
-void dcr_boost_launch_end(void);
-void dcr_apkcache_report(void);
+#include "watchdog.h"
 
 typedef jint (*fn_onload)(void *vm, void *reserved);
 
-static volatile int g_exit, g_focused = 1, g_focus_changed, g_started;
 static uint64_t g_frames;
 
-void lab_request_exit(void) { g_exit = 1; }
+void lab_request_exit(void) { rt_request_exit(); }
 uint64_t lab_frame_count(void) { return g_frames; }
 
-/* the watchdog: frames presented, and whether a stop is expected */
+/* the watchdog: frames presented */
 uint64_t dcr_boot_frames(void) { return dcr_gl_frames(); }
-int dcr_boot_in_focus(void) { return g_focused && g_started && !g_exit; }
 
 /* ------------------------------------------------------------- lifecycle */
-static AppletHookCookie g_hook;
-
-static void on_applet(AppletHookType type, void *param) {
-  if (type == AppletHookType_OnExitRequest) {
-    debugPrintf("[applet] the system asked the game to close\n");
-    g_exit = 1;
-  }
-  if (type == AppletHookType_OnFocusState || type == AppletHookType_OnOperationMode) {
-    int focused = appletGetFocusState() == AppletFocusState_InFocus;
-    if (focused != g_focused) {
-      g_focused = focused;
-      g_focus_changed = 1;
-    }
-  }
-}
-
 static void save_all(void) {
   lab_reg_save();
   lab_levels_save();
 }
 
-static void apply_focus(void) {
-  if (!g_focus_changed || !g_started)
-    return;
-  g_focus_changed = 0;
-  if (!g_focused) {
-    debugPrintf("[boot] focus lost: onPause\n");
-    if (lab_game_active() && lab_game_popup_open() == 0)
-      lab_game_show_menu(); /* back to a paused level, not a rolling ball */
-    if (lab_versus_active())
-      lab_versus_set_paused(1); /* local play too */
-    lab_audio_pause(1);
-    save_all();
-    log_flush_ring();
-    dcr_time_suspend();
-  } else {
-    dcr_time_resume();
-    lab_audio_pause(0);
-    debugPrintf("[boot] focus regained: onResume\n");
+/* back to a paused level, not a rolling ball */
+static void pause_play(void) {
+  if (lab_game_active() && lab_game_popup_open() == 0)
+    lab_game_show_menu();
+  if (lab_versus_active())
+    lab_versus_set_paused(1); /* local play too */
+}
+
+/* A freeze (sleep, HOME) the focus messages may not have told of: both can
+ * come at once on waking, and leave the focus as it was. */
+void port_process_frozen(unsigned count) {
+  (void)count;
+  if (lab_game_active() || lab_versus_active()) {
+    debugPrintf("[boot] the process was frozen: the level pauses\n");
+    pause_play();
   }
 }
+
+/* Android's onPause / onResume (the runtime then stops / restarts the
+ * game's clocks) */
+void port_focus_lost(void) {
+  pause_play();
+  lab_audio_pause(1);
+  save_all();
+}
+
+void port_focus_gained(void) { lab_audio_pause(0); }
 
 static void exit_guard(void *arg) {
   (void)arg;
@@ -153,6 +143,7 @@ static void housekeeping(int *launch_done, unsigned long *quiet_at, u64 *last_re
 int lab_boot_run(void) {
   lab_java_init();
   dcr_watchdog_start();
+  rt_watchdog_add_counter("audio mixes", lab_audio_mixes);
 
   /* ---- System.loadLibrary: JNI_OnLoad ---- */
   fn_onload onload = (fn_onload)so_try_find_addr_rx(&g_mod_game, "JNI_OnLoad");
@@ -175,17 +166,15 @@ int lab_boot_run(void) {
   lab_audio_init();
   lab_input_init();
   lab_ui_init();
-  appletHook(&g_hook, on_applet, NULL);
-  g_started = 1;
   debugPrintf("[boot] up; this thread draws the frames now\n");
   log_flush_ring();
 
   u64 last_report = armGetSystemTick();
   int launch_done = 0;
   unsigned long quiet_at = 0;
-  while (!g_exit && appletMainLoop()) {
-    apply_focus();
-    if (!g_focused) {
+  while (!rt_exit_requested() && appletMainLoop()) {
+    rt_applet_poll();
+    if (!rt_focused()) {
       svcSleepThread(50000000ll);
       continue;
     }
@@ -244,10 +233,8 @@ int lab_boot_run(void) {
 
   /* ---- the way out ---- */
   log_set_quiet(0);
-  appletUnhook(&g_hook);
+  rt_applet_stop(); /* the clocks run again if the game was in the background */
   exit_guard_start();
-  if (!g_focused)
-    dcr_time_resume();
   if (lab_versus_active())
     lab_versus_end();
   if (lab_game_active())

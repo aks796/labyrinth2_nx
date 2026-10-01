@@ -22,7 +22,7 @@
 
 #define WHITE 0xffffffffu
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 

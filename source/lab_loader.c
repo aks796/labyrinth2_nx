@@ -17,16 +17,14 @@
 #include <string.h>
 #include <switch.h>
 
-#include "codespace.h"
 #include "config.h"
-#include "dcr_net.h"
 #include "error.h"
 #include "imports.h"
 #include "lab.h"
 #include "so_util.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 so_module g_mod_game, g_mod_game2, g_mod_game3, g_mod_game4;
 static int g_up[4] = {1, 0, 0, 0}; /* each copy: 1 up, -1 could not be, 0 not yet */
@@ -111,11 +109,11 @@ static int load_into(so_module *m) { return load_into_ex(m, NULL); }
 static int load_into_ex(so_module *m, int (*patch)(so_module *)) {
   char path[512];
   snprintf(path, sizeof path, "%s/%s", dcr_game_root(), LAB_LIB_GAME);
-  int rc = so_load(m, path, NULL, SO_REGION_BYTES);
+  int rc = so_load(m, path, NULL, PORT_SO_REGION_BYTES);
   if (rc < 0) {
     const char *why = rc == -1 ? "cannot open it, or it is not a 32-bit ARM ELF"
                     : rc == -2 ? "out of memory"
-                    : rc == -3 ? "larger than SO_REGION_BYTES"
+                    : rc == -3 ? "larger than PORT_SO_REGION_BYTES"
                     : rc == -4 ? "too many program headers" : "?";
     debugPrintf("[boot] so_load(%s) failed rc=%d: %s\n", path, rc, why);
     return -1;
@@ -186,25 +184,3 @@ void lab_run_constructors(void) {
   debugPrintf("[boot] %s constructors done in %llu ms\n", g_mod_game.base_name,
               (unsigned long long)(armTicksToNs(armGetSystemTick() - t0) / 1000000ull));
 }
-
-/* ------------------------------------------------ the shared runtime's hooks
- * codespace.h: code written at run time by the game's own modules (PvZ's mod
- * did that); this engine never does, so every request is the plain shim's. */
-volatile int g_cs_armed;
-void *cs_mmap(size_t len, int prot, const void *caller) { return NULL; }
-int cs_munmap(void *addr, size_t len) { return 0; }
-int cs_mprotect(void *addr, size_t len, int prot, const void *caller) {
-  /* The engine's own pages: never a real change (text stays RX, data RW). */
-  return so_find_module_by_addr(addr) != NULL;
-}
-int cs_write(void *dst, const void *src, size_t n, int c, int kind) { return 0; }
-
-/* exc_handler.c: no trampoline pool here. */
-int dcr_in_code_pool(const void *p) { return 0; }
-
-/* dcr_net.h: offline; the engine has no sockets. */
-int dcr_net_owns(int fd) { return 0; }
-int dcr_net_close(int fd) { return -1; }
-int dcr_net_fcntl(int fd, int cmd, long arg) { return -1; }
-int dcr_net_ioctl(int fd, unsigned long req, void *arg) { return -1; }
-short dcr_net_ready(int fd, short events) { return 0; }

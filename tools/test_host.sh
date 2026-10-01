@@ -12,7 +12,7 @@ OUT="${TMPDIR:-/tmp}/lab_host_test"
 rm -rf "$OUT" && mkdir -p "$OUT"
 cc -std=gnu11 -O1 -g -Wall -Wno-unused-function -Wno-sign-compare -Wno-unused-but-set-variable \
   -Wno-unknown-warning-option -Wno-misleading-indentation -Wno-unused-value \
-  -I"$HERE/tools/host" -I"$HERE/source" -I"$HERE/portlibs32/include" \
+  -I"$HERE/tools/host" -I"$HERE/source" -I"$HERE/runtime/source" -I"$HERE/portlibs32/include" \
   "$HERE/tools/test_host.c" "$HERE/source/lab_apk.c" "$HERE/source/lab_files.c" \
   "$HERE/source/lab_levels.c" "$HERE/source/lab_registry.c" "$HERE/source/lab_text.c" \
   "$HERE/tools/host/miniz_host.c" -lz -o "$OUT/test_host"

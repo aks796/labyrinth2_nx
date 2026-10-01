@@ -159,8 +159,7 @@ void lab_audio_enable(int on);              /* enable/disableSounds */
 void lab_audio_mute_game(int on);           /* SoundManager.c()/d(): the "m" flag */
 void lab_audio_pause(int paused);           /* HOME: silence, no mixing */
 void lab_audio_click(void);                 /* SoundManager.b(): the menu click */
-uint32_t lab_audio_mixes(void);
-void lab_audio_selftest(void);
+uint32_t lab_audio_mixes(void);           /* buffers mixed: the watchdog's "is the sound alive" */
 /* Sound ids (dp.java's order). */
 enum {
   SND_AWARD, SND_MENU_BUTTON_CLICK, SND_MENU_DOWNLOAD_COMPLETE, SND_BALLENLARGER_BOUNCE,

@@ -1,26 +1,24 @@
-/* dcr_config.c -- <game folder>/config.ini, the user's settings.
+/* dcr_config.c -- <game folder>/config.ini, the user's settings: Labyrinth
+ * 2's options, on the runtime's INI engine (runtime/source/rt_cfg.c).
  *
  * Written with every option, its default and a line of explanation on the
  * first start; an existing file is appended to (options a newer build adds,
  * at the end, with their defaults), so edits and comments survive updates.
  * Plain INI: [section], key = value, # comments; booleans take true/false,
  * yes/no, on/off, 1/0. Read once at start-up: changes apply the next time the
- * game starts. (The machinery is the Crossy Road port's; the options are
- * Labyrinth 2's.) MIT.
+ * game starts. The rows, their order, defaults and help text are the ones
+ * this port always wrote, so a player's config.ini reads as before; the file
+ * header is the runtime's ("# Labyrinth 2 for Switch -- settings."), the
+ * same words. MIT.
  */
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/stat.h>
 #include <switch.h>
 
-#include "dcr_build.h"
 #include "dcr_config.h"
+#include "rt_cfg.h"
 #include "util.h"
-
-const char *dcr_game_root(void);        /* main.c */
-void dcr_window_set_size(int w, int h); /* android_ndk.c */
 
 static DcrConfig g_cfg = {
     .tilt = LAB_TILT_STICK,
@@ -50,17 +48,10 @@ void dcr_config_set_level_layout(int layout) {
     g_cfg.level_layout = layout == LAB_LAYOUT_PORTRAIT ? LAB_LAYOUT_PORTRAIT : LAB_LAYOUT_ROTATED_LEFT;
 }
 
-enum { K_BOOL, K_CHOICE, K_TEXT };
-
-typedef struct {
-  const char *section, *key, *def, *help;
-  int kind;
-  const char *choices; /* K_CHOICE: comma-separated, index = value */
-} Opt;
-
-static const Opt k_opts[] = {
-    {"controls", "swap_a_b", "false",
-     "Swap A and B (true: B selects, A goes back).", K_BOOL, NULL},
+/* dst NULL: derived in apply() (level_layout, supersample, device_id), or
+ * the runtime's own (resolution: rt_config()). */
+static const CfgOpt k_opts[] = {
+    CFG_ROW_SWAP_AB("Swap A and B (true: B selects, A goes back).", &g_cfg.swap_ab),
     {"controls", "tilt", "stick",
      "What tilts the board. stick: the left stick (the D-pad tilts all the way).\n"
      "# motion: the controller's motion sensors -- hold it (or the console, in\n"
@@ -68,27 +59,29 @@ static const Opt k_opts[] = {
      "# the level position. both: motion, and the stick adds to it. The game's\n"
      "# Settings screen changes this too, and ZL in a level (motion on / off);\n"
      "# then it is kept with the saves.",
-     K_CHOICE, "stick,motion,both"},
+     CFG_CHOICE, "stick,motion,both", &g_cfg.tilt},
     {"controls", "stick_tilt", "0.5",
      "How far the board tilts with the stick all the way over, in g (the pull\n"
-     "# a phone tilted 30 degrees gives the ball): 0.1 to 1.", K_TEXT, NULL},
+     "# a phone tilted 30 degrees gives the ball): 0.1 to 1.",
+     CFG_FLOAT, NULL, &g_cfg.stick_tilt, 0.1f, 1.0f},
     {"controls", "motion_sensitivity", "1.0",
      "Motion tilt: 1 = as far as the controller is tilted, 2 = twice as far\n"
-     "# (0.25 to 4).", K_TEXT, NULL},
+     "# (0.25 to 4).",
+     CFG_FLOAT, NULL, &g_cfg.motion_gain, 0.25f, 4.0f},
     {"controls", "pointer_speed", "5",
      "Speed of the pointer on the game's own screens (pause, level end), which\n"
-     "# are touch screens: 1 to 20.", K_TEXT, NULL},
+     "# are touch screens: 1 to 20.",
+     CFG_FLOAT, NULL, &g_cfg.pointer_speed, 1.0f, 20.0f},
     {"controls", "rumble", "true",
-     "Rumble when the ball drops into a hole, reaches the goal or hits a bumper.", K_BOOL, NULL},
-    {"display", "resolution", "720",
-     "Rendering resolution: 720, 1080 or auto (1080 if docked when the game\n"
-     "# starts).", K_CHOICE, NULL},
+     "Rumble when the ball drops into a hole, reaches the goal or hits a bumper.", CFG_BOOL, NULL,
+     &g_cfg.rumble},
+    CFG_ROW_RESOLUTION("720", CFG_HELP_RESOLUTION),
     {"display", "layout", "portrait",
      "The game is a portrait (upright) phone game. portrait: upright in the\n"
      "# middle of the screen, the side panels beside it. rotated_left /\n"
      "# rotated_right: turned a quarter to fill the screen, for a console held\n"
      "# upright (its left / right side at the top; touch and tilt turn with it).",
-     K_CHOICE, "portrait,rotated_left,rotated_right"},
+     CFG_CHOICE, "portrait,rotated_left,rotated_right", &g_cfg.layout},
     {"display", "level_layout", "rotated_left",
      "With layout = portrait: how a level is shown while it is played (the\n"
      "# menus stay upright). rotated_left: the board turned a quarter to fill\n"
@@ -96,130 +89,45 @@ static const Opt k_opts[] = {
      "# game's pause and end-of-level screens turn back upright to be read).\n"
      "# portrait: upright, as the menus. ZR in a level changes it (kept with\n"
      "# the saves).",
-     K_CHOICE, "portrait,rotated_left"},
+     CFG_CHOICE, "portrait,rotated_left", NULL},
     {"display", "supersample", "auto",
      "Draw the game at twice the size and scale it down (smoother edges).\n"
-     "# auto: at 720p yes, at 1080p no. true / false.", K_TEXT, NULL},
+     "# auto: at 720p yes, at 1080p no. true / false.",
+     CFG_TEXT, NULL, NULL},
     {"display", "menus", "ipad",
      "The menus: ipad = Labyrinth 2 HD's (landscape; needs the iPad game's .ipa\n"
      "# in this folder: its pictures, its iPad level packs); android = the phone's\n"
-     "# (portrait).", K_CHOICE, "ipad,android"},
+     "# (portrait).",
+     CFG_CHOICE, "ipad,android", &g_cfg.menus},
     {"display", "side_panels", "true",
      "Portrait layout: the blue background and the controls beside the game\n"
-     "# (false: black).", K_BOOL, NULL},
+     "# (false: black).",
+     CFG_BOOL, NULL, &g_cfg.side_panels},
     {"online", "enabled", "true",
      "The Labyrinth 2 level server: Download levels (the community's level\n"
      "# packs, their ratings) and Create (your own packs from the web editor\n"
-     "# at labyrinth2.com, and publishing them). false: offline.", K_BOOL, NULL},
+     "# at labyrinth2.com, and publishing them). false: offline.",
+     CFG_BOOL, NULL, &g_cfg.online},
     {"online", "device_id", "",
      "Leave empty. The server keeps one account (your ID and PIN) per device;\n"
      "# the port makes this console's id once (from its serial number, else its\n"
      "# user, never shared with another console) and keeps it in\n"
      "# data/device_id. To use the account of another device, put its id here\n"
-     "# (8 to 16 hex digits, e.g. a phone's Android ID).", K_TEXT, NULL},
-    {"performance", "boost_cpu_when_loading", "true",
-     "CPU at 1785 MHz while the game starts (until its first picture) and\n"
-     "# inside loading frames (those over 50 ms), normal otherwise.",
-     K_BOOL, NULL},
-    {"debug", "gl_selftest", "false", "Graphics self-test picture at start-up.", K_BOOL, NULL},
-    {"debug", "boot_log_on_screen", "false",
-     "Show the start-up log on screen at every launch. Off: the log appears only\n"
-     "# while something is being set up (first launch, a new APK or NRO).",
-     K_BOOL, NULL},
-    {"debug", "log_java_calls", "false",
-     "Write every Java method the game calls to debug.log (slow; for bug reports).", K_BOOL,
-     NULL},
+     "# (8 to 16 hex digits, e.g. a phone's Android ID).",
+     CFG_TEXT, NULL, g_cfg.device_id, 0, 0, sizeof g_cfg.device_id},
+    CFG_ROW_BOOST(CFG_HELP_BOOST, &g_cfg.boost),
+    CFG_ROW_GL_SELFTEST(&g_cfg.gl_selftest),
+    CFG_ROW_BOOT_LOG(CFG_HELP_BOOT_LOG, &g_cfg.boot_log),
+    CFG_ROW_LOG_JNI(CFG_HELP_LOG_JNI, &g_cfg.log_jni),
     {"debug", "log_touches", "false",
-     "Write every touch the game gets (its 320x480 coordinates) to debug.log.", K_BOOL, NULL},
-    {"config", "version", "1", "Settings file format; leave as it is.", K_TEXT, NULL},
+     "Write every touch the game gets (its 320x480 coordinates) to debug.log.", CFG_BOOL, NULL,
+     &g_cfg.log_touch},
 };
-#define O_COUNT ((int)(sizeof k_opts / sizeof k_opts[0]))
 
-static char g_val[O_COUNT][48];
-static int g_have[O_COUNT];
-
-static int opt_index(const char *section, const char *key) {
-  for (int i = 0; i < O_COUNT; i++)
-    if (!strcmp(k_opts[i].section, section) && !strcmp(k_opts[i].key, key))
-      return i;
-  return -1;
-}
-
-static void path_of(char *out, size_t cap, const char *name) {
-  snprintf(out, cap, "%s/%s", dcr_game_root(), name);
-}
-
-static char *trim(char *s) {
-  while (*s == ' ' || *s == '\t')
-    s++;
-  char *e = s + strlen(s);
-  while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n'))
-    *--e = 0;
-  return s;
-}
-
-static void parse(FILE *f) {
-  char line[256], section[32] = "";
-  while (fgets(line, sizeof line, f)) {
-    char *s = trim(line);
-    if (!*s || *s == '#' || *s == ';')
-      continue;
-    if (*s == '[') {
-      char *e = strchr(s, ']');
-      if (e) {
-        *e = 0;
-        snprintf(section, sizeof section, "%s", trim(s + 1));
-      }
-      continue;
-    }
-    char *eq = strchr(s, '=');
-    if (!eq)
-      continue;
-    *eq = 0;
-    char *key = trim(s), *val = trim(eq + 1);
-    char *hash = strpbrk(val, "#;");
-    if (hash) {
-      *hash = 0;
-      val = trim(val);
-    }
-    for (int i = 0; i < O_COUNT; i++)
-      if (!strcasecmp(section, k_opts[i].section) && !strcasecmp(key, k_opts[i].key)) {
-        snprintf(g_val[i], sizeof g_val[i], "%s", val);
-        g_have[i] = 1;
-      }
-  }
-}
-
-static void write_opts(FILE *f, int only_missing) {
-  const char *last = NULL;
-  for (int i = 0; i < O_COUNT; i++) {
-    if (only_missing && g_have[i])
-      continue;
-    if (!last || strcmp(last, k_opts[i].section)) {
-      fprintf(f, "\n[%s]\n", k_opts[i].section);
-    }
-    last = k_opts[i].section;
-    if (k_opts[i].help)
-      fprintf(f, "# %s\n", k_opts[i].help);
-    fprintf(f, "%s = %s\n", k_opts[i].key, g_val[i]);
-  }
-}
-
-static int as_bool(int i) {
-  const char *v = g_val[i];
-  if (!strcasecmp(v, "true") || !strcasecmp(v, "yes") || !strcasecmp(v, "on") || !strcmp(v, "1"))
-    return 1;
-  if (!strcasecmp(v, "false") || !strcasecmp(v, "no") || !strcasecmp(v, "off") || !strcmp(v, "0"))
-    return 0;
-  debugPrintf("[config] %s = %s: not true/false, using %s\n", k_opts[i].key, v, k_opts[i].def);
-  return !strcmp(k_opts[i].def, "true");
-}
-
-/* index of the value in the option's choice list, 0 (the first) if unknown */
-static int as_choice(int i) {
-  const char *v = g_val[i];
-  const char *c = k_opts[i].choices;
-  for (int idx = 0; c && *c; idx++) {
+/* index of the value in a comma-separated list, -1 if it is not one */
+static int choice_of(const char *choices, const char *v) {
+  const char *c = choices;
+  for (int idx = 0; *c; idx++) {
     const char *e = strchr(c, ',');
     size_t n = e ? (size_t)(e - c) : strlen(c);
     if (strlen(v) == n && !strncasecmp(v, c, n))
@@ -228,95 +136,46 @@ static int as_choice(int i) {
       break;
     c = e + 1;
   }
-  if (strcasecmp(v, k_opts[i].def))
-    debugPrintf("[config] %s = %s: not one of %s, using %s\n", k_opts[i].key, v,
-                k_opts[i].choices, k_opts[i].def);
-  return 0;
+  return -1;
 }
 
-static float as_float(int i, float lo, float hi) {
-  float v = (float)atof(g_val[i]);
-  if (!(v >= lo && v <= hi)) {
-    debugPrintf("[config] %s = %s: not %g..%g, using %s\n", k_opts[i].key, g_val[i], lo, hi,
-                k_opts[i].def);
-    v = (float)atof(k_opts[i].def);
+static void apply(void) {
+  const RtConfig *rt = rt_config();
+  g_cfg.res_w = rt->res_w;
+  g_cfg.res_h = rt->res_h;
+  /* a level_layout that is none of its choices is portrait, as this port
+   * always read it (the engine's rows fall back to the default instead) */
+  const char *ll = rt_config_get("display", "level_layout");
+  int lli = choice_of("portrait,rotated_left", ll);
+  if (lli < 0) {
+    if (strcasecmp(ll, "rotated_left"))
+      debugPrintf("[config] level_layout = %s: not one of portrait,rotated_left, using rotated_left\n", ll);
+    lli = 0;
   }
-  return v;
-}
-
-void dcr_config_load(void) {
-  for (int i = 0; i < O_COUNT; i++)
-    snprintf(g_val[i], sizeof g_val[i], "%s", k_opts[i].def);
-  char path[300];
-  path_of(path, sizeof path, "config.ini");
-  FILE *f = fopen(path, "r");
-  if (f) {
-    parse(f);
-    fclose(f);
-    int missing = 0;
-    for (int i = 0; i < O_COUNT; i++)
-      missing += !g_have[i];
-    if (missing && (f = fopen(path, "a"))) {
-      fprintf(f, "\n# Added by build %llu (new options, at their defaults):\n",
-              (unsigned long long)DCR_BUILD);
-      write_opts(f, 1);
-      fclose(f);
-      debugPrintf("[config] added %d new option%s to config.ini\n", missing, missing > 1 ? "s" : "");
-    }
-  } else if ((f = fopen(path, "w"))) {
-    fputs("# Labyrinth 2 for Switch -- settings.\n"
-          "# Changes apply the next time the game starts. Delete this file to get\n"
-          "# the defaults back.\n",
-          f);
-    write_opts(f, 0);
-    fclose(f);
-    debugPrintf("[config] wrote config.ini with the defaults\n");
-  }
-
-  g_cfg.swap_ab = as_bool(opt_index("controls", "swap_a_b"));
-  g_cfg.tilt = as_choice(opt_index("controls", "tilt"));
-  g_cfg.stick_tilt = as_float(opt_index("controls", "stick_tilt"), 0.1f, 1.0f);
-  g_cfg.motion_gain = as_float(opt_index("controls", "motion_sensitivity"), 0.25f, 4.0f);
-  g_cfg.pointer_speed = as_float(opt_index("controls", "pointer_speed"), 1.0f, 20.0f);
-  g_cfg.rumble = as_bool(opt_index("controls", "rumble"));
-  g_cfg.layout = as_choice(opt_index("display", "layout"));
-  dcr_config_set_level_layout(as_choice(opt_index("display", "level_layout")));
-  g_cfg.side_panels = as_bool(opt_index("display", "side_panels"));
-  g_cfg.menus = as_choice(opt_index("display", "menus"));
-  g_cfg.online = as_bool(opt_index("online", "enabled"));
-  snprintf(g_cfg.device_id, sizeof g_cfg.device_id, "%s", g_val[opt_index("online", "device_id")]);
-  g_cfg.boost = as_bool(opt_index("performance", "boost_cpu_when_loading"));
-  g_cfg.gl_selftest = as_bool(opt_index("debug", "gl_selftest"));
-  g_cfg.boot_log = as_bool(opt_index("debug", "boot_log_on_screen"));
-  g_cfg.log_jni = as_bool(opt_index("debug", "log_java_calls"));
-  g_cfg.log_touch = as_bool(opt_index("debug", "log_touches"));
-
-  const char *r = g_val[opt_index("display", "resolution")];
-  int docked = appletGetOperationMode() == AppletOperationMode_Console;
-  int h = !strcmp(r, "720") ? 720 : !strcmp(r, "1080") ? 1080 : !strcasecmp(r, "auto") ? (docked ? 1080 : 720) : 0;
-  if (!h) {
-    debugPrintf("[config] resolution = %s: not 720, 1080 or auto, using 720\n", r);
-    h = 720;
-  }
-  g_cfg.res_h = h;
-  g_cfg.res_w = h * 16 / 9;
-  dcr_window_set_size(g_cfg.res_w, g_cfg.res_h);
-  {
-    int i = opt_index("display", "supersample");
-    const char *v = g_val[i];
-    if (!strcasecmp(v, "auto"))
-      g_cfg.supersample = h <= 720 ? 2 : 1;
-    else
-      g_cfg.supersample = as_bool(i) ? 2 : 1;
-  }
+  dcr_config_set_level_layout(lli);
+  const char *ss = rt_config_get("display", "supersample");
+  if (!strcasecmp(ss, "auto"))
+    g_cfg.supersample = g_cfg.res_h <= 720 ? 2 : 1;
+  else
+    g_cfg.supersample = rt_config_bool("display", "supersample") ? 2 : 1;
 
   static const char *const tilts[] = {"stick", "motion", "both"};
   static const char *const layouts[] = {"portrait", "rotated left", "rotated right"};
+  int docked = appletGetOperationMode() == AppletOperationMode_Console;
   debugPrintf("[config] %dx%d (%s, %s), %s (levels %s), supersample %dx, side panels %s; A/B %s; tilt %s "
               "(stick %.2f g, motion x%.2f), pointer %.0f; CPU boost %s\n",
-              g_cfg.res_w, g_cfg.res_h, r, docked ? "docked" : "handheld", layouts[g_cfg.layout],
-              layouts[g_cfg.level_layout],
-              g_cfg.supersample, g_cfg.side_panels ? "on" : "off", g_cfg.swap_ab ? "swapped" : "normal",
-              tilts[g_cfg.tilt], (double)g_cfg.stick_tilt, (double)g_cfg.motion_gain,
-              (double)g_cfg.pointer_speed, g_cfg.boost ? "on" : "off");
+              g_cfg.res_w, g_cfg.res_h, rt_config_get("display", "resolution"), docked ? "docked" : "handheld",
+              layouts[g_cfg.layout], layouts[g_cfg.level_layout], g_cfg.supersample,
+              g_cfg.side_panels ? "on" : "off", g_cfg.swap_ab ? "swapped" : "normal", tilts[g_cfg.tilt],
+              (double)g_cfg.stick_tilt, (double)g_cfg.motion_gain, (double)g_cfg.pointer_speed,
+              g_cfg.boost ? "on" : "off");
 }
+
+static const CfgTable k_table = {
+    .opts = k_opts,
+    .nopts = CFG_COUNT(k_opts),
+    .version = 1,
+    .apply = apply,
+};
+
+void dcr_config_load(void) { rt_config_load(&k_table); }

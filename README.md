@@ -80,6 +80,9 @@ their own controller. A Joy-Con held sideways works on its own.
 
 * Docker
 * The AArch32 toolchain image `ghcr.io/vita2hos/devcontainer/vita2hos`
+* [android32](https://github.com/aks796/android32), the runtime the 32-bit
+  ports share, at `runtime/`: a submodule (`git clone --recursive`, or
+  `git submodule update --init`).
 * [libnx32](https://github.com/aks796/libnx32) 4.12.0 or newer, the 32-bit
   libnx. `build.sh` mounts its `prefix/` from a libnx32 checkout next to
   this one (`../libnx32`, built with its `./build.sh`), or from `DCR_LIBNX32`.

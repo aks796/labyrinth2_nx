@@ -37,7 +37,7 @@
 #include "so_util.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 #if DCR_GL_MESA
 #include <EGL/egl.h>

@@ -20,13 +20,9 @@
  * as a playback rate (linear interpolation), gain on both channels.
  *
  * The samples are decoded from the APK once at start-up (stb_vorbis, on a
- * thread: the splash shows meanwhile). The mixer thread renders 1024-frame
- * buffers of 48 kHz stereo and queues three ahead.
- *
- * audout's buffer descriptor is an IPC structure with 64-bit fields for every
- * client, while libnx32's AudioOutBuffer has 32-bit pointers, so append and
- * get-released are issued with the right layout here (from the Crossy Road
- * and PvZ ports, where the self-test below proved it on hardware). MIT.
+ * thread: the splash shows meanwhile). The mixer renders 1024-frame buffers
+ * of 48 kHz stereo on the runtime's audout pump (rt_audout.c), which queues
+ * three ahead. MIT.
  */
 #include <malloc.h>
 #include <math.h>
@@ -36,153 +32,12 @@
 #include <switch.h>
 
 #include "lab.h"
+#include "rt_audout.h"
 #include "util.h"
 
 #define STB_VORBIS_NO_STDIO
 #define STB_VORBIS_NO_PUSHDATA_API
 #include "stb_vorbis.inc"
-
-/* ================================================================ audout */
-typedef struct {
-  u64 next, buffer, buffer_size, data_size, data_offset;
-} AoBuf;
-_Static_assert(sizeof(AoBuf) == 0x28, "audout buffer descriptor");
-
-#define NBUF 3
-#define FRAMES_PER_BUF 1024 /* 1024 * 4 bytes = one 0x1000 page */
-#define BUF_BYTES (FRAMES_PER_BUF * 4)
-
-static AoBuf g_bufs[NBUF] __attribute__((aligned(16)));
-static int16_t *g_pcm[NBUF];
-static int g_queued[NBUF];
-static int g_ao_ready;
-static u32 g_out_rate = 48000;
-
-static Result ao_append(AoBuf *b) {
-  u64 tag = (u64)(uintptr_t)b;
-  const bool auto_ = hosversionAtLeast(3, 0, 0);
-  return serviceDispatchIn(audoutGetServiceSession_AudioOut(), auto_ ? 7 : 3, tag,
-                           .buffer_attrs = {auto_ ? (SfBufferAttr_HipcAutoSelect | SfBufferAttr_In)
-                                                  : (SfBufferAttr_HipcMapAlias | SfBufferAttr_In)},
-                           .buffers = {{b, sizeof(*b)}});
-}
-
-static Result ao_released(u64 *tags, u32 max, u32 *count) {
-  const bool auto_ = hosversionAtLeast(3, 0, 0);
-  return serviceDispatchOut(audoutGetServiceSession_AudioOut(), auto_ ? 8 : 5, *count,
-                            .buffer_attrs = {auto_ ? (SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out)
-                                                   : (SfBufferAttr_HipcMapAlias | SfBufferAttr_Out)},
-                            .buffers = {{tags, max * sizeof(u64)}});
-}
-
-static void reap(void) {
-  u64 tags[NBUF] = {0};
-  u32 n = 0;
-  if (R_SUCCEEDED(ao_released(tags, NBUF, &n)))
-    for (u32 k = 0; k < n && k < NBUF; k++)
-      for (int i = 0; i < NBUF; i++)
-        if (tags[k] == (u64)(uintptr_t)&g_bufs[i])
-          g_queued[i] = 0;
-}
-
-static int free_buffer(void) {
-  for (int pass = 0; pass < 2; pass++) {
-    for (int i = 0; i < NBUF; i++)
-      if (!g_queued[i])
-        return i;
-    reap();
-  }
-  return -1;
-}
-
-static int ao_open(void) {
-  if (g_ao_ready)
-    return 0;
-  Result rc = audoutInitialize();
-  if (R_FAILED(rc)) {
-    debugPrintf("[audio] audoutInitialize failed 0x%x\n", rc);
-    return -1;
-  }
-  rc = audoutStartAudioOut();
-  if (R_FAILED(rc)) {
-    debugPrintf("[audio] audoutStartAudioOut failed 0x%x\n", rc);
-    audoutExit();
-    return -1;
-  }
-  g_out_rate = audoutGetSampleRate() ? audoutGetSampleRate() : 48000;
-  for (int i = 0; i < NBUF; i++) {
-    g_pcm[i] = memalign(0x1000, BUF_BYTES);
-    if (!g_pcm[i])
-      return -1;
-    memset(g_pcm[i], 0, BUF_BYTES);
-    g_bufs[i].buffer = (u64)(uintptr_t)g_pcm[i];
-    g_bufs[i].buffer_size = BUF_BYTES;
-    g_bufs[i].data_size = BUF_BYTES;
-  }
-  g_ao_ready = 1;
-  debugPrintf("[audio] audout open: %u Hz, %u ch\n", (unsigned)g_out_rate,
-              (unsigned)audoutGetChannelCount());
-  return 0;
-}
-
-static unsigned long g_underruns, g_append_fails, g_dropped, g_submits;
-static volatile int g_stop_thread;
-
-/* Queue one full buffer of 48 kHz stereo s16; blocks while all are in use. */
-static void submit(const int16_t *frames) {
-  int i;
-  reap();
-  int queued = 0;
-  for (int k = 0; k < NBUF; k++)
-    queued += g_queued[k];
-  if (!queued && g_submits > NBUF)
-    g_underruns++;
-  while ((i = free_buffer()) < 0 && !g_stop_thread)
-    svcSleepThread(2000000ll);
-  if (i < 0)
-    return;
-  memcpy(g_pcm[i], frames, BUF_BYTES);
-  armDCacheFlush(g_pcm[i], BUF_BYTES);
-  g_bufs[i].data_size = BUF_BYTES;
-  g_bufs[i].data_offset = 0;
-  for (int attempt = 0; attempt < 5; attempt++) {
-    Result rc = ao_append(&g_bufs[i]);
-    if (R_SUCCEEDED(rc)) {
-      g_queued[i] = 1;
-      g_submits++;
-      return;
-    }
-    if (g_append_fails++ < 3)
-      debugPrintf("[audio] audout append failed 0x%x (retrying)\n", (unsigned)rc);
-    svcSleepThread(2000000ll);
-    reap();
-  }
-  g_dropped++;
-}
-
-/* Self-check of the descriptor layout, before the game runs: two buffers of
- * silence must come back from the audio server. */
-void lab_audio_selftest(void) {
-  if (ao_open() != 0)
-    return;
-  static int16_t silence[FRAMES_PER_BUF * 2];
-  submit(silence);
-  submit(silence);
-  u64 t0 = armGetSystemTick();
-  int back = 0;
-  while (armTicksToNs(armGetSystemTick() - t0) < 500000000ull) {
-    reap();
-    back = 0;
-    for (int i = 0; i < NBUF; i++)
-      back += !g_queued[i];
-    if (back == NBUF)
-      break;
-    svcSleepThread(5000000ll);
-  }
-  debugPrintf("[audio] self-test: %s (%d/%d buffers returned in %llu ms)\n",
-              back == NBUF ? "OK" : "FAILED -- buffer descriptor not accepted", back, NBUF,
-              (unsigned long long)(armTicksToNs(armGetSystemTick() - t0) / 1000000ull));
-}
 
 /* ============================================================== samples */
 /* res/raw/<name>.ogg, as SoundManager.e() loads them */
@@ -330,11 +185,8 @@ static u64 g_last_play[SND_COUNT];
 static int g_disabled; /* l */
 static int g_muted;    /* m */
 static Mutex g_lock;
-static volatile int g_paused;
-static volatile uint32_t g_mixes;
-
-uint32_t lab_audio_mixes(void) { return g_mixes; }
-void lab_audio_pause(int paused) { g_paused = paused; }
+uint32_t lab_audio_mixes(void) { return (uint32_t)rt_audout_pump_blocks(); }
+void lab_audio_pause(int paused) { rt_audout_pause(paused); } /* in the background: the voices wait where they are */
 
 static int effects_on(void) { return lab_reg_get_int("setting-sound-effects", 1) != 0; }
 
@@ -506,11 +358,11 @@ void lab_audio_mute_game(int on) {
 void lab_audio_click(void) { lab_audio_play(0, SND_MENU_BUTTON_CLICK, 1.0f, 1.0f); }
 
 /* ============================================================ the mixer */
-static Thread g_thread;
 static int g_thread_up;
 
-static void mix(int16_t *out) {
-  static int32_t acc[FRAMES_PER_BUF * 2];
+static void mix(int16_t *out, int frames, void *ud) {
+  (void)ud;
+  static int32_t acc[RT_AUDOUT_FRAMES * 2];
   memset(acc, 0, sizeof acc);
   mutexLock(&g_lock);
   for (int k = 0; k < NVOICE; k++) {
@@ -518,10 +370,10 @@ static void mix(int16_t *out) {
     if (!v->on)
       continue;
     const Sample *s = &g_samples[v->sample];
-    const double step = (double)v->rate * (double)s->rate / (double)g_out_rate; /* rate is 0.5..2 */
+    const double step = (double)v->rate * (double)s->rate / (double)rt_audout_rate(); /* rate is 0.5..2 */
     const int g = (int)(v->gain * 256.0f);
     double pos = v->pos;
-    for (int f = 0; f < FRAMES_PER_BUF; f++) {
+    for (int f = 0; f < frames; f++) {
       if (pos >= (double)s->frames) {
         if (!v->loop) {
           v->on = 0;
@@ -546,24 +398,9 @@ static void mix(int16_t *out) {
     v->pos = pos;
   }
   mutexUnlock(&g_lock);
-  for (int i = 0; i < FRAMES_PER_BUF * 2; i++) {
+  for (int i = 0; i < frames * 2; i++) {
     int32_t x = acc[i];
     out[i] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x);
-  }
-}
-
-static void audio_thread(void *arg) {
-  static int16_t out[FRAMES_PER_BUF * 2];
-  debugPrintf("[audio] mixer thread running (%u Hz)\n", (unsigned)g_out_rate);
-  while (!g_stop_thread) {
-    if (g_paused) {
-      /* in the background: the voices wait where they are */
-      svcSleepThread(10000000ll);
-      continue;
-    }
-    mix(out);
-    g_mixes++;
-    submit(out);
   }
 }
 
@@ -574,13 +411,9 @@ void lab_audio_init(void) {
     threadStart(&dec);
   else
     decode_all(NULL);
-  if (ao_open() != 0)
+  /* priority 0x28 on core 2: above the game's (main) thread, so the mixer
+   * keeps up */
+  if (rt_audout_pump_start(mix, NULL, 0x28, 2) != 0)
     return;
-  /* priority 0x28: above the game's (main) thread, so the mixer keeps up */
-  if (R_FAILED(threadCreate(&g_thread, audio_thread, NULL, NULL, 0x10000, 0x28, 2)) ||
-      R_FAILED(threadStart(&g_thread))) {
-    debugPrintf("[audio] could not start the mixer thread\n");
-    return;
-  }
   g_thread_up = 1;
 }

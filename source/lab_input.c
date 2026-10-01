@@ -41,6 +41,7 @@
 
 #include "dcr_config.h"
 #include "lab.h"
+#include "rt_pad.h"
 #include "util.h"
 
 /* the kinds of controller a motion level is kept for */
@@ -67,23 +68,9 @@ typedef struct {
 
 static Player P[2] = {{.id = HidNpadIdType_No1, .kind = -1}, {.id = HidNpadIdType_No2, .kind = -1}};
 
-static int is_single(u64 st) {
-  return (st & (HidNpadStyleTag_NpadJoyLeft | HidNpadStyleTag_NpadJoyRight)) &&
-         !(st & (HidNpadStyleTag_NpadHandheld | HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadFullKey));
-}
-
-/* a vector in a lone Joy-Con's own frame (x right, y up, held upright) ->
- * the sideways hold's (the player's) */
-static void sideways(u64 st, float *x, float *y) {
-  float cx = *x, cy = *y;
-  if (st & HidNpadStyleTag_NpadJoyLeft) { /* turned anticlockwise */
-    *x = -cy;
-    *y = cx;
-  } else { /* the right one, clockwise */
-    *x = cy;
-    *y = -cx;
-  }
-}
+/* A lone Joy-Con (rt_pad_is_single) is held sideways: rt_pad_sideways turns
+ * a vector in its own frame (x right, y up, held upright) into the player's,
+ * rt_pad_single_buttons its buttons (the runtime's rt_pad.c). */
 
 static void player_init(int i) {
   Player *pl = &P[i];
@@ -152,7 +139,7 @@ void lab_test_init(void);
 void lab_input_init(void) {
   lab_test_init();
   /* two players (local play); a lone player is player 1 as before */
-  padConfigureInput(2, HidNpadStyleSet_NpadStandard);
+  rt_pad_setup(RT_PAD_MAX_PLAYERS, 1);
   for (int i = 0; i < 2; i++)
     player_init(i);
   if (R_FAILED(threadCreate(&g_sampler, sampler, NULL, NULL, 0x2000, 0x2C, -2)) || R_FAILED(threadStart(&g_sampler)))
@@ -204,7 +191,7 @@ static int read_six(Player *pl, float a[3], int *kind) {
     return 0;
   a[0] = s.acceleration.x * flip, a[1] = s.acceleration.y * flip, a[2] = s.acceleration.z;
   if (*kind == K_LEFT || *kind == K_RIGHT)
-    sideways(st, &a[0], &a[1]);
+    rt_pad_sideways(st, &a[0], &a[1]);
   return 1;
 }
 
@@ -406,34 +393,6 @@ void lab_input_stick_tilt(const LabPad *p, float out[3]) {
 }
 
 /* ------------------------------------------------------------ buttons */
-/* a lone Joy-Con's buttons, as the sideways hold has them */
-static u64 single_buttons(u64 st, u64 b) {
-  u64 o = b & ~(HidNpadButton_A | HidNpadButton_B | HidNpadButton_X | HidNpadButton_Y | HidNpadButton_Up |
-                HidNpadButton_Down | HidNpadButton_Left | HidNpadButton_Right | HidNpadButton_Minus |
-                HidNpadButton_StickL | HidNpadButton_StickR);
-  if (st & HidNpadStyleTag_NpadJoyLeft) {
-    /* its arrows: Down at the right, Left at the bottom, Up at the left,
-     * Right at the top */
-    if (b & HidNpadButton_Down) o |= HidNpadButton_A;
-    if (b & HidNpadButton_Left) o |= HidNpadButton_B;
-    if (b & HidNpadButton_Up) o |= HidNpadButton_Y;
-    if (b & HidNpadButton_Right) o |= HidNpadButton_X;
-  } else {
-    /* X at the right, A at the bottom, B at the left, Y at the top */
-    if (b & HidNpadButton_X) o |= HidNpadButton_A;
-    if (b & HidNpadButton_A) o |= HidNpadButton_B;
-    if (b & HidNpadButton_B) o |= HidNpadButton_Y;
-    if (b & HidNpadButton_Y) o |= HidNpadButton_X;
-  }
-  /* SL / SR under the index fingers: L / R; its one of + and -: + (the
-   * pause); the stick's click: ZL (motion on / off) */
-  if (b & (HidNpadButton_LeftSL | HidNpadButton_RightSL)) o |= HidNpadButton_L;
-  if (b & (HidNpadButton_LeftSR | HidNpadButton_RightSR)) o |= HidNpadButton_R;
-  if (b & (HidNpadButton_Minus | HidNpadButton_Plus)) o |= HidNpadButton_Plus;
-  if (b & (HidNpadButton_StickL | HidNpadButton_StickR)) o |= HidNpadButton_ZL;
-  return o;
-}
-
 static u64 swap_ab(u64 x) {
   const u64 ab = HidNpadButton_A | HidNpadButton_B;
   return (x & ~ab) | ((x & HidNpadButton_A) ? HidNpadButton_B : 0) | ((x & HidNpadButton_B) ? HidNpadButton_A : 0);
@@ -461,9 +420,9 @@ static void read_player(Player *pl, LabPad *out, int rotate_layout) {
   /* what is held, and what was pressed since the last frame (let go again) */
   u64 held = padGetButtons(&pl->pad) | take_latched((int)(pl - P));
   static u64 prev_held[2];
-  const int single = is_single(st);
+  const int single = rt_pad_is_single(st);
   if (single)
-    held = single_buttons(st, held);
+    held = rt_pad_single_buttons(st, held);
   if (dcr_config()->swap_ab)
     held = swap_ab(held);
   float tlx = -2, tly = 0;
@@ -485,7 +444,7 @@ static void read_player(Player *pl, LabPad *out, int rotate_layout) {
   out->lx = (float)ls.x / 32767.0f, out->ly = (float)ls.y / 32767.0f;
   out->rx = (float)rs.x / 32767.0f, out->ry = (float)rs.y / 32767.0f;
   if (single)
-    sideways(st, &out->lx, &out->ly);
+    rt_pad_sideways(st, &out->lx, &out->ly);
   if (tlx > -2)
     out->lx = tlx, out->ly = tly;
   if (rotate_layout) {

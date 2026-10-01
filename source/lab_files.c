@@ -47,7 +47,7 @@
 #include "lab.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 void dcr_dircache_forget(void);   /* dcr_dircache.c */
 
 static char g_files[300], g_files_ipad[300];

@@ -11,7 +11,7 @@ OUT="${2:-$HERE/preview}"
 WORK="${TMPDIR:-/tmp}/lab_preview"
 rm -rf "$WORK" && mkdir -p "$WORK"
 cc -std=gnu11 -O1 -g -w -DGL_SILENCE_DEPRECATION \
-  -I"$HERE/tools/host" -I"$HERE/source" -I"$HERE/portlibs32/include" \
+  -I"$HERE/tools/host" -I"$HERE/source" -I"$HERE/runtime/source" -I"$HERE/portlibs32/include" \
   "$HERE/tools/preview.c" "$HERE/source/lab_ui.c" "$HERE/source/lab_screens.c" "$HERE/source/lab_draw.c" \
   "$HERE/source/lab_font.c" "$HERE/source/lab_text.c" "$HERE/source/lab_levels.c" \
   "$HERE/source/lab_registry.c" "$HERE/source/lab_apk.c" "$HERE/source/lab_files.c" \

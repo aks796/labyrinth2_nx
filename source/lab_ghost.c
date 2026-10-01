@@ -36,7 +36,7 @@
 #include "lab.h"
 #include "util.h"
 
-const char *dcr_game_root(void); /* main.c */
+const char *dcr_game_root(void); /* the runtime (dcr_path.c) */
 
 /* ---- the runs (single player) */
 /* a point of a run: where the ball was at its time t; x NAN from where it
